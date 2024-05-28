@@ -24,6 +24,20 @@ import triton
 import triton.language as tl
 
 
+def backend_name():
+    return triton.runtime.driver.active.get_current_target().backend
+
+
+def is_cpu():
+    return backend_name() == "cpu"
+
+
+NUM_ELEMENTS = 98432
+BLOCK_SIZE = 512
+
+print(f"NUM_ELEMENTS = {NUM_ELEMENTS}, BLOCK_SIZE = {BLOCK_SIZE}, MASK = True")
+
+
 @triton.jit
 def add_kernel(x_ptr,  # *Pointer* to first input vector.
                y_ptr,  # *Pointer* to second input vector.
@@ -60,7 +74,7 @@ def add_kernel(x_ptr,  # *Pointer* to first input vector.
 def add(x: torch.Tensor, y: torch.Tensor):
     # We need to preallocate the output.
     output = torch.empty_like(x)
-    assert x.is_cuda and y.is_cuda and output.is_cuda
+    assert x.is_cuda == y.is_cuda and y.is_cuda == output.is_cuda
     n_elements = output.numel()
     # The SPMD launch grid denotes the number of kernel instances that run in parallel.
     # It is analogous to CUDA launch grids. It can be either Tuple[int], or Callable(metaparameters) -> Tuple[int].
@@ -70,7 +84,7 @@ def add(x: torch.Tensor, y: torch.Tensor):
     #  - Each torch.tensor object is implicitly converted into a pointer to its first element.
     #  - `triton.jit`'ed functions can be indexed with a launch grid to obtain a callable GPU kernel.
     #  - Don't forget to pass meta-parameters as keywords arguments.
-    add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
+    add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=BLOCK_SIZE)
     # We return a handle to z but, since `torch.cuda.synchronize()` hasn't been called, the kernel is still
     # running asynchronously at this point.
     return output
@@ -80,15 +94,19 @@ def add(x: torch.Tensor, y: torch.Tensor):
 # We can now use the above function to compute the element-wise sum of two `torch.tensor` objects and test its correctness:
 
 torch.manual_seed(0)
-size = 98432
-x = torch.rand(size, device='cuda')
-y = torch.rand(size, device='cuda')
+size = NUM_ELEMENTS
+x = torch.rand(size, device='cuda' if not is_cpu() else 'cpu')
+y = torch.rand(size, device='cuda' if not is_cpu() else 'cpu')
 output_torch = x + y
 output_triton = add(x, y)
-print(output_torch)
-print(output_triton)
-print(f'The maximum difference between torch and triton is '
-      f'{torch.max(torch.abs(output_torch - output_triton))}')
+# print(output_torch)
+# print(output_triton)
+# print(f'The maximum difference between torch and triton ({backend_name()}) is '
+#       f'{torch.max(torch.abs(output_torch - output_triton))}')
+if torch.max(torch.abs(output_torch - output_triton)) < 1e-3:
+    print("Test passed!")
+else:
+    print("Test failed!")
 
 # %%
 # Seems like we're good to go!
@@ -115,9 +133,9 @@ print(f'The maximum difference between torch and triton is '
         plot_name='vector-add-performance',  # Name for the plot. Used also as a file name for saving the plot.
         args={},  # Values for function arguments not in `x_names` and `y_name`.
     ))
-def benchmark(size, provider):
-    x = torch.rand(size, device='cuda', dtype=torch.float32)
-    y = torch.rand(size, device='cuda', dtype=torch.float32)
+def benchmark(size, provider, device):
+    x = torch.rand(size, device=device, dtype=torch.float32)
+    y = torch.rand(size, device=device, dtype=torch.float32)
     quantiles = [0.5, 0.2, 0.8]
     if provider == 'torch':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: x + y, quantiles=quantiles)
@@ -130,4 +148,4 @@ def benchmark(size, provider):
 # %%
 # We can now run the decorated function above. Pass `print_data=True` to see the performance number, `show_plots=True` to plot them, and/or
 # `save_path='/path/to/results/' to save them to disk along with raw CSV data:
-benchmark.run(print_data=True, show_plots=True)
+# benchmark.run(print_data=True, show_plots=True, device='cuda' if not is_cpu() else 'cpu')
